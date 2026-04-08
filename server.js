@@ -1,14 +1,21 @@
+// 
+
 const express = require('express');
 const cors = require('cors');
 const db = require('./database');
 
 const app = express();
-//app.use(cors());
+
 app.use(cors({
-    origin: ['http://localhost:3000', 'http://localhost:5173', 'https://bellcorpfrontend.vercel.app'],
+    origin: [
+        'http://localhost:3000',
+        'http://localhost:5173',
+        'https://bellcorpfrontend.vercel.app'
+    ],
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
     credentials: true
 }));
+
 app.use(express.json());
 
 const PORT = process.env.PORT || 5000;
@@ -20,12 +27,20 @@ const LIMITS = {
     Truck: 2
 };
 
-// Endpoints
+// Test route
+app.get('/', (req, res) => {
+    res.send('Backend is working');
+});
+
+// Availability
 app.get('/api/availability', (req, res) => {
-    db.all(`SELECT vehicle_type, count(*) as count FROM tickets WHERE status = 'PARKED' GROUP BY vehicle_type`, [], (err, rows) => {
-        if (err) {
-            return res.status(500).json({ error: err.message });
-        }
+    try {
+        const rows = db.prepare(`
+            SELECT vehicle_type, count(*) as count
+            FROM tickets
+            WHERE status = 'PARKED'
+            GROUP BY vehicle_type
+        `).all();
 
         let counts = { Bike: 0, Car: 0, Truck: 0 };
         rows.forEach(row => {
@@ -37,53 +52,73 @@ app.get('/api/availability', (req, res) => {
             cars: { limit: LIMITS.Car, count: counts.Car, available: LIMITS.Car - counts.Car },
             trucks: { limit: LIMITS.Truck, count: counts.Truck, available: LIMITS.Truck - counts.Truck }
         });
-    });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
+// Park Vehicle
 app.post('/api/park', (req, res) => {
-    const { vehicle_number, vehicle_type } = req.body;
-    if (!vehicle_number || !vehicle_type) {
-        return res.status(400).json({ error: 'vehicle_number and vehicle_type are required' });
-    }
-    if (!LIMITS[vehicle_type]) {
-        return res.status(400).json({ error: 'Invalid vehicle_type' });
-    }
+    try {
+        const { vehicle_number, vehicle_type } = req.body;
 
-    db.get(`SELECT count(*) as count FROM tickets WHERE status = 'PARKED' AND vehicle_type = ?`, [vehicle_type], (err, row) => {
-        if (err) return res.status(500).json({ error: err.message });
+        if (!vehicle_number || !vehicle_type) {
+            return res.status(400).json({ error: 'vehicle_number and vehicle_type are required' });
+        }
+
+        if (!LIMITS[vehicle_type]) {
+            return res.status(400).json({ error: 'Invalid vehicle_type' });
+        }
+
+        const row = db.prepare(`
+            SELECT count(*) as count
+            FROM tickets
+            WHERE status = 'PARKED' AND vehicle_type = ?
+        `).get(vehicle_type);
 
         if (row.count >= LIMITS[vehicle_type]) {
             return res.status(400).json({ error: 'Parking Full for this vehicle type' });
         }
 
-        db.run(`INSERT INTO tickets (vehicle_number, vehicle_type, entry_time) VALUES (?, ?, CURRENT_TIMESTAMP)`, [vehicle_number, vehicle_type], function (err) {
-            if (err) return res.status(500).json({ error: err.message });
+        const result = db.prepare(`
+            INSERT INTO tickets (vehicle_number, vehicle_type, entry_time)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+        `).run(vehicle_number, vehicle_type);
 
-            db.get(`SELECT * FROM tickets WHERE id = ?`, [this.lastID], (err, row) => {
-                res.json({ message: 'Vehicle parked successfully', ticket: row });
-            });
-        });
-    });
+        const ticket = db.prepare(`
+            SELECT * FROM tickets WHERE id = ?
+        `).get(result.lastInsertRowid);
+
+        res.json({ message: 'Vehicle parked successfully', ticket });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
+// Exit Vehicle
 app.post('/api/exit', (req, res) => {
-    const { ticket_id, vehicle_number } = req.body;
+    try {
+        const { ticket_id, vehicle_number } = req.body;
 
-    let query = `SELECT * FROM tickets WHERE status = 'PARKED' AND `;
-    let param = [];
-    if (ticket_id) {
-        query += `id = ?`;
-        param.push(ticket_id);
-    } else if (vehicle_number) {
-        query += `vehicle_number = ?`;
-        param.push(vehicle_number);
-    } else {
-        return res.status(400).json({ error: 'Please provide ticket_id or vehicle_number' });
-    }
+        let row;
 
-    db.get(query, param, (err, row) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (!row) return res.status(404).json({ error: 'Ticket/Vehicle not found or already exited' });
+        if (ticket_id) {
+            row = db.prepare(`
+                SELECT * FROM tickets
+                WHERE status = 'PARKED' AND id = ?
+            `).get(ticket_id);
+        } else if (vehicle_number) {
+            row = db.prepare(`
+                SELECT * FROM tickets
+                WHERE status = 'PARKED' AND vehicle_number = ?
+            `).get(vehicle_number);
+        } else {
+            return res.status(400).json({ error: 'Please provide ticket_id or vehicle_number' });
+        }
+
+        if (!row) {
+            return res.status(404).json({ error: 'Ticket/Vehicle not found or already exited' });
+        }
 
         const entryTime = new Date(row.entry_time + 'Z'); // SQLite CURRENT_TIMESTAMP is UTC
         const exitTime = new Date();
@@ -101,29 +136,41 @@ app.post('/api/exit', (req, res) => {
 
         const formattedExitTime = exitTime.toISOString().replace('T', ' ').slice(0, 19);
 
-        db.run(`UPDATE tickets SET status = 'EXITED', exit_time = ?, fee = ? WHERE id = ?`, [formattedExitTime, fee, row.id], function (err) {
-            if (err) return res.status(500).json({ error: err.message });
+        db.prepare(`
+            UPDATE tickets
+            SET status = 'EXITED', exit_time = ?, fee = ?
+            WHERE id = ?
+        `).run(formattedExitTime, fee, row.id);
 
-            res.json({
-                message: 'Vehicle exited successfully',
-                ticket_id: row.id,
-                vehicle_number: row.vehicle_number,
-                entry_time: row.entry_time,
-                exit_time: formattedExitTime,
-                duration_hours: durationHours.toFixed(2),
-                fee: fee
-            });
+        res.json({
+            message: 'Vehicle exited successfully',
+            ticket_id: row.id,
+            vehicle_number: row.vehicle_number,
+            entry_time: row.entry_time,
+            exit_time: formattedExitTime,
+            duration_hours: durationHours.toFixed(2),
+            fee: fee
         });
-    });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
+// Parked Vehicles
 app.get('/api/parked', (req, res) => {
-    db.all(`SELECT * FROM tickets WHERE status = 'PARKED' ORDER BY entry_time DESC`, [], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
+    try {
+        const rows = db.prepare(`
+            SELECT * FROM tickets
+            WHERE status = 'PARKED'
+            ORDER BY entry_time DESC
+        `).all();
+
         res.json(rows);
-    });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.listen(PORT, () => {
-    console.log(`Backend server running on http://localhost:${PORT}`);
+    console.log(`Backend server running on port ${PORT}`);
 });
