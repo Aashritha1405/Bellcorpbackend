@@ -3,16 +3,21 @@ const cors = require('cors');
 const db = require('./database');
 
 const app = express();
-app.use(cors());
+//app.use(cors());
+app.use(cors({
+    origin: ['http://localhost:3000', 'http://localhost:5173', 'https://bellcorpfrontend.vercel.app/'],
+    methods: ['GET', 'POST'],
+    credentials: true
+}));
 app.use(express.json());
 
 const PORT = process.env.PORT || 5000;
 
 // Configs
 const LIMITS = {
-  Bike: 5,
-  Car: 5,
-  Truck: 2
+    Bike: 5,
+    Car: 5,
+    Truck: 2
 };
 
 // Endpoints
@@ -21,7 +26,7 @@ app.get('/api/availability', (req, res) => {
         if (err) {
             return res.status(500).json({ error: err.message });
         }
-        
+
         let counts = { Bike: 0, Car: 0, Truck: 0 };
         rows.forEach(row => {
             counts[row.vehicle_type] = row.count;
@@ -51,9 +56,9 @@ app.post('/api/park', (req, res) => {
             return res.status(400).json({ error: 'Parking Full for this vehicle type' });
         }
 
-        db.run(`INSERT INTO tickets (vehicle_number, vehicle_type, entry_time) VALUES (?, ?, CURRENT_TIMESTAMP)`, [vehicle_number, vehicle_type], function(err) {
+        db.run(`INSERT INTO tickets (vehicle_number, vehicle_type, entry_time) VALUES (?, ?, CURRENT_TIMESTAMP)`, [vehicle_number, vehicle_type], function (err) {
             if (err) return res.status(500).json({ error: err.message });
-            
+
             db.get(`SELECT * FROM tickets WHERE id = ?`, [this.lastID], (err, row) => {
                 res.json({ message: 'Vehicle parked successfully', ticket: row });
             });
@@ -63,7 +68,7 @@ app.post('/api/park', (req, res) => {
 
 app.post('/api/exit', (req, res) => {
     const { ticket_id, vehicle_number } = req.body;
-    
+
     let query = `SELECT * FROM tickets WHERE status = 'PARKED' AND `;
     let param = [];
     if (ticket_id) {
@@ -96,7 +101,7 @@ app.post('/api/exit', (req, res) => {
 
         const formattedExitTime = exitTime.toISOString().replace('T', ' ').slice(0, 19);
 
-        db.run(`UPDATE tickets SET status = 'EXITED', exit_time = ?, fee = ? WHERE id = ?`, [formattedExitTime, fee, row.id], function(err) {
+        db.run(`UPDATE tickets SET status = 'EXITED', exit_time = ?, fee = ? WHERE id = ?`, [formattedExitTime, fee, row.id], function (err) {
             if (err) return res.status(500).json({ error: err.message });
 
             res.json({
